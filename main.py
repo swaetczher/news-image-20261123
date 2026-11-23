@@ -1,499 +1,327 @@
 #!/usr/bin/env python3
-"""World news front page for Monday 23 November 2026.
+"""World news in one image -- Monday 23 November 2026 (round 2).
 
-Writes one image to /output/entry.png (or $OUTPUT_PATH).
-Stdlib only, no network, deterministic: two runs write identical bytes.
+Draws a 1024x1024 newspaper front page summarising five verified
+stories of 23 November 2026 and writes it to /output/entry.png.
 
-Layout: newspaper front page. Masthead, big date band, one hero story
-(COP31 collapse) plus four stories in a 2x2 grid. A second layout
-(poster: tall hero left, stacked panels right) is selectable with
-LAYOUT=b for pairwise comparison; the default is the newspaper layout.
+Stdlib only: struct, sys, zlib, hashlib. No network access, no eval,
+no dynamic imports, no environment access, no shell. The program reads
+nothing from the environment and runs nothing but its own code, so the
+output is byte-identical on every run (fixed zlib level, no timestamps
+in the PNG).
+
+Stories (all verified against Reuters/AP/UN News, see riset-2.md):
+  1. Dymer toll rises to 11 (Monday morning, Kyiv region mourns)
+  2. Ukraine sinks Russian corvette Merkury off Libya (Zelenskyy says)
+  3. Democrats win 258 US House seats (biggest since 1992)
+  4. After COP31 collapses, blame begins (Monday reactions)
+  5. Drones hit Khartoum (Sunday strikes, UN/US condemn Monday)
+
+Claims are kept separate from facts in the labels: "Zelenskyy says",
+"Sudan alleges". Dates use neutral phrases ("Sunday", "Monday",
+"announced Monday") and the masthead date stays MONDAY, 23 NOVEMBER
+2026, the day being summarised.
 """
 
-import os
+import hashlib
 import struct
+import sys
 import zlib
 
-# Pairwise verdict, 23 Nov 2026 (checked from the rendered PNGs, full size
-# and downscaled to 300 px wide): layout A wins over layout B. In A every
-# story body is scale 3, so all five headlines and bodies stay legible at
-# 300 px; in B the two right-column stories drop to scale 2 bodies that turn
-# to grey mush at 300 px, and the tall hero wastes its lower third on empty
-# paper. A is also the cleaner newspaper composition: one hero, one even
-# 2x2 grid, no dead space. Default stays "a"; B is kept only as a comparison
-# reference selectable with LAYOUT=b.
+# ---------------------------------------------------------------- font
+# 5x7 bitmap font. Each glyph is 7 rows of 5 cells; '#' is ink.
+# Only the characters used by the page text are defined; rendering
+# uppercases everything first, so no lowercase glyphs are needed.
+FONT = {
+    "A": (".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
+    "B": ("####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."),
+    "C": (".####", "#....", "#....", "#....", "#....", "#....", ".####"),
+    "D": ("####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."),
+    "E": ("#####", "#....", "#....", "####.", "#....", "#....", "#####"),
+    "F": ("#####", "#....", "#....", "####.", "#....", "#....", "#...."),
+    "G": (".####", "#....", "#....", "#.###", "#...#", "#...#", ".###."),
+    "H": ("#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
+    "I": ("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"),
+    "J": ("..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."),
+    "K": ("#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"),
+    "L": ("#....", "#....", "#....", "#....", "#....", "#....", "#####"),
+    "M": ("#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"),
+    "N": ("#...#", "##..#", "##..#", "#.#.#", "#..##", "#..##", "#...#"),
+    "O": (".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
+    "P": ("####.", "#...#", "#...#", "####.", "#....", "#....", "#...."),
+    "Q": (".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"),
+    "R": ("####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"),
+    "S": (".####", "#....", "#....", ".###.", "....#", "....#", "####."),
+    "T": ("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."),
+    "U": ("#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
+    "V": ("#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."),
+    "W": ("#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"),
+    "X": ("#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"),
+    "Y": ("#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."),
+    "Z": ("#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"),
+    "0": (".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."),
+    "1": ("..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."),
+    "2": (".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"),
+    "3": ("####.", "....#", "....#", ".###.", "....#", "....#", "####."),
+    "4": ("...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."),
+    "5": ("#####", "#....", "####.", "....#", "....#", "#...#", ".###."),
+    "6": (".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."),
+    "7": ("#####", "....#", "...#.", "...#.", "..#..", "..#..", "..#.."),
+    "8": (".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."),
+    "9": (".###.", "#...#", "#...#", ".####", "....#", "....#", ".###."),
+    " ": (".....", ".....", ".....", ".....", ".....", ".....", "....."),
+    ".": (".....", ".....", ".....", ".....", ".....", ".##..", ".##.."),
+    ",": (".....", ".....", ".....", ".....", ".....", ".##..", ".#..."),
+    ":": (".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."),
+    ";": (".....", ".##..", ".##..", ".....", ".##..", ".##..", ".#..."),
+    "!": ("..#..", "..#..", "..#..", "..#..", "..#..", ".....", "..#.."),
+    "?": (".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."),
+    "-": (".....", ".....", ".....", "#####", ".....", ".....", "....."),
+    "'": ("..#..", "..#..", ".....", ".....", ".....", ".....", "....."),
+    "(": ("...##", "..#..", ".#...", ".#...", ".#...", "..#..", "...##"),
+    ")": ("##...", "..#..", "...#.", "...#.", "...#.", "..#..", "##..."),
+    "%": ("#...#", "#..#.", "...#.", "..#..", ".#...", "#..#.", "#...#"),
+    "/": ("....#", "....#", "...#.", "..#..", ".#...", "#....", "#...."),
+    "+": (".....", "..#..", "..#..", "#####", "..#..", "..#..", "....."),
+    "=": (".....", ".....", "#####", ".....", "#####", ".....", "....."),
+    "$": ("..#..", ".####", "#.#..", ".###.", "..#.#", "####.", "..#.."),
+    '"': (".#.#.", ".#.#.", ".....", ".....", ".....", ".....", "....."),
+    "*": (".....", ".#.#.", ".###.", "#####", ".###.", ".#.#.", "....."),
+    "_": (".....", ".....", ".....", ".....", ".....", ".....", "#####"),
+    "#": (".#.#.", ".#.#.", "#####", ".#.#.", "#####", ".#.#.", ".#.#."),
+    "&": (".##..", "#..#.", "#..#.", ".#...", "#.#.#", "#..#.", ".##.#"),
+    "[": (".###.", ".#...", ".#...", ".#...", ".#...", ".#...", ".###."),
+    "]": (".###.", "...#.", "...#.", "...#.", "...#.", "...#.", ".###."),
+    "@": (".###.", "#...#", "#.###", "#.#.#", "#.###", "#....", ".###."),
+}
 
+# ---------------------------------------------------------------- canvas
 W = 1024
 H = 1024
 
-PAPER = (247, 243, 234)
-INK = (26, 26, 26)
-NAVY = (20, 33, 61)
-RED = (185, 28, 28)
-GOLD = (217, 119, 6)
-WHITE = (255, 255, 255)
-LIGHT = (238, 234, 224)
-GREEN = (22, 101, 52)
-BLUE = (29, 78, 216)
-TEAL = (15, 118, 110)
-PURPLE = (126, 34, 206)
-GREY = (90, 88, 82)
+PAPER = (250, 246, 235)   # warm newsprint
+CARD = (255, 255, 255)    # panel fill
+INK = (18, 18, 18)        # headlines, borders
+BODY = (38, 38, 38)       # body text
+MUTED = (110, 105, 95)    # footer text
+NAVY = (16, 32, 66)       # masthead
+RED = (178, 24, 28)       # date ribbon, hero accent
+BLUE = (28, 68, 142)      # Merkury panel accent
+STEEL = (24, 84, 130)     # Democrats panel accent
+GREEN = (22, 110, 70)     # COP31 panel accent
+PURPLE = (110, 40, 140)   # Khartoum panel accent
 
-# ---------------------------------------------------------------------------
-# 5x7 bitmap font, drawn from scratch. Each glyph is 7 rows of 5 bits.
-# ---------------------------------------------------------------------------
-FONT = {
-    "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
-    "B": ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
-    "C": ("01110", "10001", "10000", "10000", "10000", "10001", "01110"),
-    "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
-    "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
-    "F": ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
-    "G": ("01110", "10001", "10000", "10111", "10001", "10001", "01111"),
-    "H": ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
-    "I": ("01110", "00100", "00100", "00100", "00100", "00100", "01110"),
-    "J": ("00111", "00010", "00010", "00010", "00010", "10010", "01100"),
-    "K": ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
-    "L": ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
-    "M": ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
-    "N": ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
-    "O": ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
-    "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
-    "Q": ("01110", "10001", "10001", "10001", "10101", "10010", "01101"),
-    "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
-    "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
-    "T": ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
-    "U": ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
-    "V": ("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
-    "W": ("10001", "10001", "10001", "10101", "10101", "10101", "01010"),
-    "X": ("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
-    "Y": ("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
-    "Z": ("11111", "00001", "00010", "00100", "01000", "10000", "11111"),
-    "a": ("00000", "00000", "01110", "00001", "01111", "10001", "01111"),
-    "b": ("10000", "10000", "10110", "11001", "10001", "10001", "11110"),
-    "c": ("00000", "00000", "01110", "10000", "10000", "10001", "01110"),
-    "d": ("00001", "00001", "01101", "10011", "10001", "10001", "01111"),
-    "e": ("00000", "00000", "01110", "10001", "11111", "10000", "01110"),
-    "f": ("00110", "01001", "01000", "11110", "01000", "01000", "01000"),
-    "g": ("00000", "01111", "10001", "10001", "01111", "00001", "01110"),
-    "h": ("10000", "10000", "10110", "11001", "10001", "10001", "10001"),
-    "i": ("00100", "00000", "01100", "00100", "00100", "00100", "01110"),
-    "j": ("00010", "00000", "00110", "00010", "00010", "10010", "01100"),
-    "k": ("10000", "10000", "10010", "10100", "11000", "10100", "10010"),
-    "l": ("01100", "00100", "00100", "00100", "00100", "00100", "01110"),
-    "m": ("00000", "00000", "11010", "10101", "10101", "10101", "10101"),
-    "n": ("00000", "00000", "10110", "11001", "10001", "10001", "10001"),
-    "o": ("00000", "00000", "01110", "10001", "10001", "10001", "01110"),
-    "p": ("00000", "00000", "10110", "11001", "10001", "11110", "10000"),
-    "q": ("00000", "00000", "01101", "10011", "10001", "01111", "00001"),
-    "r": ("00000", "00000", "10110", "11001", "10000", "10000", "10000"),
-    "s": ("00000", "00000", "01111", "10000", "01110", "00001", "11110"),
-    "t": ("01000", "01000", "11110", "01000", "01000", "01000", "00110"),
-    "u": ("00000", "00000", "10001", "10001", "10001", "10011", "01101"),
-    "v": ("00000", "00000", "10001", "10001", "10001", "01010", "00100"),
-    "w": ("00000", "00000", "10001", "10101", "10101", "10101", "01010"),
-    "x": ("00000", "00000", "10001", "01010", "00100", "01010", "10001"),
-    "y": ("00000", "00000", "10001", "10001", "01111", "00001", "01110"),
-    "z": ("00000", "00000", "11111", "00010", "00100", "01000", "11111"),
-    "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
-    "1": ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
-    "2": ("01110", "10001", "00001", "00110", "01000", "10000", "11111"),
-    "3": ("11111", "00010", "00100", "00010", "00001", "10001", "01110"),
-    "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
-    "5": ("11111", "10000", "11110", "00001", "00001", "10001", "01110"),
-    "6": ("00110", "01000", "10000", "11110", "10001", "10001", "01110"),
-    "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
-    "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
-    "9": ("01110", "10001", "10001", "01111", "00001", "00010", "01100"),
-    " ": ("00000", "00000", "00000", "00000", "00000", "00000", "00000"),
-    ".": ("00000", "00000", "00000", "00000", "00000", "01100", "01100"),
-    ",": ("00000", "00000", "00000", "00000", "01100", "00100", "01000"),
-    ":": ("00000", "01100", "01100", "00000", "01100", "01100", "00000"),
-    ";": ("00000", "01100", "01100", "00000", "01100", "00100", "01000"),
-    "!": ("00100", "00100", "00100", "00100", "00100", "00000", "00100"),
-    "?": ("01110", "10001", "00001", "00110", "00100", "00000", "00100"),
-    "'": ("00100", "00100", "01000", "00000", "00000", "00000", "00000"),
-    '"': ("01010", "01010", "00000", "00000", "00000", "00000", "00000"),
-    "-": ("00000", "00000", "00000", "01110", "00000", "00000", "00000"),
-    "(": ("00010", "00100", "01000", "01000", "01000", "00100", "00010"),
-    ")": ("01000", "00100", "00010", "00010", "00010", "00100", "01000"),
-    "%": ("11001", "11010", "00010", "00100", "01000", "01011", "10011"),
-    "/": ("00001", "00010", "00010", "00100", "01000", "01000", "10000"),
-    "+": ("00000", "00100", "00100", "11111", "00100", "00100", "00000"),
-    "&": ("01100", "10010", "10100", "01000", "10101", "10010", "01101"),
-    "=": ("00000", "00000", "11111", "00000", "11111", "00000", "00000"),
-    "[": ("01110", "01000", "01000", "01000", "01000", "01000", "01110"),
-    "]": ("01110", "00010", "00010", "00010", "00010", "00010", "01110"),
-    "#": ("01010", "01010", "11111", "01010", "01010", "11111", "01010"),
-    "$": ("00100", "01111", "10100", "01110", "00101", "11110", "00100"),
-    "@": ("01110", "10001", "10111", "10101", "10110", "10000", "01110"),
-    "_": ("00000", "00000", "00000", "00000", "00000", "00000", "11111"),
-    "*": ("00000", "10101", "01110", "10101", "00000", "00000", "00000"),
-    ">": ("01000", "00100", "00010", "00001", "00010", "00100", "01000"),
-    "<": ("00010", "00100", "01000", "10000", "01000", "00100", "00010"),
-    "|": ("00100", "00100", "00100", "00100", "00100", "00100", "00100"),
-}
+canvas = bytearray(W * H * 3)
+for _i in range(W * H):
+    canvas[_i * 3] = PAPER[0]
+    canvas[_i * 3 + 1] = PAPER[1]
+    canvas[_i * 3 + 2] = PAPER[2]
 
 
-# ---------------------------------------------------------------------------
-# Canvas helpers
-# ---------------------------------------------------------------------------
-class Canvas:
-    def __init__(self, w, h, bg):
-        self.w = w
-        self.h = h
-        self.px = bytearray(w * h * 3)
-        self.fill(0, 0, w, h, bg)
+def rect(x, y, w, h, color):
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(W, x + w)
+    y1 = min(H, y + h)
+    for yy in range(y0, y1):
+        base = yy * W * 3
+        for xx in range(x0, x1):
+            o = base + xx * 3
+            canvas[o] = color[0]
+            canvas[o + 1] = color[1]
+            canvas[o + 2] = color[2]
 
-    def set(self, x, y, color):
-        if 0 <= x < self.w and 0 <= y < self.h:
-            i = (y * self.w + x) * 3
-            self.px[i] = color[0]
-            self.px[i + 1] = color[1]
-            self.px[i + 2] = color[2]
 
-    def fill(self, x, y, w, h, color):
-        x0 = max(0, x)
-        y0 = max(0, y)
-        x1 = min(self.w, x + w)
-        y1 = min(self.h, y + h)
-        r, g, b = color
-        for yy in range(y0, y1):
-            base = (yy * self.w + x0) * 3
-            for xx in range(x0, x1):
-                i = base + (xx - x0) * 3
-                self.px[i] = r
-                self.px[i + 1] = g
-                self.px[i + 2] = b
-
-    def line(self, x0, y0, x1, y1, color, thick=1):
-        dx = abs(x1 - x0)
-        dy = -abs(y1 - y0)
-        sx = 1 if x0 < x1 else -1
-        sy = 1 if y0 < y1 else -1
-        err = dx + dy
-        while True:
-            self.fill(x0, y0, thick, thick, color)
-            if x0 == x1 and y0 == y1:
-                break
-            e2 = 2 * err
-            if e2 >= dy:
-                err += dy
-                x0 += sx
-            if e2 <= dx:
-                err += dx
-                y0 += sy
-
-    def circle(self, cx, cy, rad, color, thick=2):
-        # Midpoint circle outline.
-        x = rad
-        y = 0
-        err = 0
-        while x >= y:
-            for px, py in ((cx + x, cy + y), (cx + y, cy + x),
-                           (cx - y, cy + x), (cx - x, cy + y),
-                           (cx - x, cy - y), (cx - y, cy - x),
-                           (cx + y, cy - x), (cx + x, cy - y)):
-                self.fill(px, py, thick, thick, color)
-            y += 1
-            err += 1 + 2 * y
-            if 2 * (err - x) + 1 > 0:
-                x -= 1
-                err += 1 - 2 * x
+def border(x, y, w, h, color, t=2):
+    rect(x, y, w, t, color)
+    rect(x, y + h - t, w, t, color)
+    rect(x, y, t, h, color)
+    rect(x + w - t, y, t, h, color)
 
 
 def text_width(text, scale):
-    if not text:
-        return 0
+    """Pixel width of text at the given scale (no trailing advance)."""
     return len(text) * 6 * scale - scale
 
 
-def draw_text(cv, x, y, text, scale, color, align="left"):
-    if align == "center":
-        x = x - text_width(text, scale) // 2
-    elif align == "right":
-        x = x - text_width(text, scale)
+def draw_text(x, y, text, scale, color):
+    text = text.upper()
     cx = x
     for ch in text:
         glyph = FONT.get(ch)
         if glyph is None:
-            glyph = FONT[" "]
+            raise ValueError("missing glyph for %r" % ch)
         for row in range(7):
-            bits = glyph[row]
+            grow = glyph[row]
             for col in range(5):
-                if bits[col] == "1":
-                    cv.fill(cx + col * scale, y + row * scale,
-                            scale, scale, color)
+                if grow[col] == "#":
+                    rect(cx + col * scale, y + row * scale,
+                         scale, scale, color)
         cx += 6 * scale
 
 
-def wrap(text, scale, max_w):
-    """Greedy word wrap; returns a list of lines fitting max_w."""
-    words = text.split(" ")
+def wrap(text, max_chars):
+    """Greedy word wrap; returns a list of lines, each <= max_chars."""
+    words = text.upper().split(" ")
     lines = []
     cur = ""
     for word in words:
-        trial = word if not cur else cur + " " + word
-        if text_width(trial, scale) <= max_w:
-            cur = trial
+        if not cur:
+            cur = word
+        elif len(cur) + 1 + len(word) <= max_chars:
+            cur = cur + " " + word
         else:
-            if cur:
-                lines.append(cur)
+            lines.append(cur)
             cur = word
     if cur:
         lines.append(cur)
+    for line in lines:
+        if len(line) > max_chars:
+            raise ValueError("unwrappable line %r" % line)
     return lines
 
-
-# ---------------------------------------------------------------------------
-# Story data (verified 23 Nov 2026 morning, WIB)
-# ---------------------------------------------------------------------------
-HERO = {
-    "kicker": "CLIMATE SUMMIT - ANTALYA - SUNDAY",
-    "kicker_short": "CLIMATE - ANTALYA - SUNDAY",
-    "headline": ["COP31 COLLAPSES:", "NO CLIMATE DEAL"],
-    "body": ("EU, UK and vulnerable nations reject a draft that never "
-             "mentions fossil fuels. The longest climate summit in history "
-             "ends with no pact."),
-    "accent": GREEN,
-}
-
-STORIES = [
-    {
-        "kicker": "THE GULF - BAHRAIN - SATURDAY NIGHT",
-        "kicker_short": "GULF - BAHRAIN - SAT NIGHT",
-        "headline": ["IRAN HITS US BASES", "IN BAHRAIN"],
-        "headline_narrow": ["IRAN HITS", "US BASES IN", "BAHRAIN"],
-        "body": ("Bahrain: 2 hurt, a plant on fire. Iran CLAIMS 2 Patriot "
-                 "radars destroyed."),
-        "accent": RED,
-        "icon": "missile",
-    },
-    {
-        "kicker": "UKRAINE - DYMER, NEAR KYIV - SUNDAY",
-        "kicker_short": "UKRAINE - DYMER - SUNDAY",
-        "headline": ["DRONE COLLAPSES", "FLATS NEAR KYIV"],
-        "headline_narrow": ["DRONE", "COLLAPSES", "FLATS NEAR KYIV"],
-        "body": ("At least 2 dead, 11-15 missing. A Russian drone brings "
-                 "down a 5-storey block."),
-        "accent": BLUE,
-        "icon": "building",
-    },
-    {
-        "kicker": "TRADE - BRUSSELS - SATURDAY",
-        "headline": ["EU-INDONESIA SIGN", "MEGA TRADE DEAL"],
-        "body": ("After a decade of talks, CEPA is signed. Tariffs gone on "
-                 "98.5% of lines. Not yet in force."),
-        "accent": TEAL,
-        "icon": "arrows",
-    },
-    {
-        "kicker": "HONG KONG - SUNDAY",
-        "headline": ["HONG KONG VOTES:", "98.79% TURNOUT"],
-        "body": ("856 candidates, 723 seats: the Election Committee picks "
-                 "the next leader in 2027."),
-        "accent": PURPLE,
-        "icon": "ballot",
-    },
-]
+# ---------------------------------------------------------------- layout
+MARGIN = 24
+CONTENT_W = W - 2 * MARGIN  # 976
 
 
-# ---------------------------------------------------------------------------
-# Small pictogram icons, drawn with lines and rectangles
-# ---------------------------------------------------------------------------
-def draw_icon(cv, kind, x, y, size, color):
-    if kind == "globe":
-        cx, cy = x + size // 2, y + size // 2
-        r = size // 2 - 4
-        cv.circle(cx, cy, r, color, 4)
-        cv.line(cx - r, cy, cx + r, cy, color, 3)
-        cv.line(cx, cy - r, cx, cy + r, color, 3)
-        cv.line(cx - r + 8, cy - r + 10, cx + r - 8, cy - r + 10, color, 3)
-        cv.line(cx - r + 8, cy + r - 10, cx + r - 8, cy + r - 10, color, 3)
-    elif kind == "missile":
-        cv.line(x + 8, y + size - 8, x + size - 14, y + 14, color, 6)
-        cv.fill(x + size - 22, y + 4, 18, 18, color)
-        cv.fill(x + 2, y + size - 26, 16, 6, color)
-        cv.fill(x + 14, y + size - 14, 6, 16, color)
-        cv.fill(x + 2, y + size - 8, 8, 8, GOLD)
-    elif kind == "building":
-        cv.fill(x + 4, y + size // 3, size // 3, size * 2 // 3 - 4, color)
-        cv.fill(x + size // 2, y + 8, size // 3, size - 12, color)
-        cv.line(x + 4, y + size // 3 - 8, x + size // 2, y + size // 3 - 8,
-                color, 4)
-        for wy in (y + size // 2, y + size * 2 // 3, y + size * 5 // 6):
-            cv.fill(x + 10, wy, 6, 6, WHITE)
-            cv.fill(x + size // 2 + 8, wy - 8, 6, 6, WHITE)
-    elif kind == "arrows":
-        cv.line(x + 6, y + size // 3, x + size - 16, y + size // 3, color, 5)
-        cv.line(x + size - 16, y + size // 3, x + size - 26, y + size // 3 - 10,
-                color, 5)
-        cv.line(x + size - 16, y + size // 3, x + size - 26, y + size // 3 + 10,
-                color, 5)
-        cv.line(x + size - 6, y + size * 2 // 3, x + 16, y + size * 2 // 3,
-                color, 5)
-        cv.line(x + 16, y + size * 2 // 3, x + 26, y + size * 2 // 3 - 10,
-                color, 5)
-        cv.line(x + 16, y + size * 2 // 3, x + 26, y + size * 2 // 3 + 10,
-                color, 5)
-    elif kind == "ballot":
-        cv.fill(x + 6, y + size // 3, size - 12, size * 2 // 3 - 6, color)
-        cv.fill(x + size // 4, y + size // 3 + 6, size // 2, 6, WHITE)
-        cv.line(x + 10, y + size // 2 + 10, x + size // 2 - 4, y + size - 12,
-                WHITE, 5)
-        cv.line(x + size // 2 - 4, y + size - 12, x + size - 12, y + 8,
-                WHITE, 5)
+def draw_centered(y, text, scale, color):
+    x = (W - text_width(text, scale)) // 2
+    draw_text(x, y, text, scale, color)
 
 
-# ---------------------------------------------------------------------------
-# Panels
-# ---------------------------------------------------------------------------
-def draw_panel(cv, x, y, w, h, story, head_scale=4, body_scale=3):
-    cv.fill(x, y, w, h, WHITE)
-    cv.fill(x, y, w, 8, story["accent"])
-    # thin border
-    cv.fill(x, y, w, 2, INK)
-    cv.fill(x, y + h - 2, w, 2, INK)
-    cv.fill(x, y, 2, h, INK)
-    cv.fill(x + w - 2, y, 2, h, INK)
-    pad = 20
-    inner = w - 2 * pad
-    ty = y + 22
-    draw_text(cv, x + pad, ty, story["kicker"], 2, story["accent"])
-    ty += 14 + 12
-    for line in story["headline"]:
-        draw_text(cv, x + pad, ty, line, head_scale, INK)
-        ty += 7 * head_scale + 6
-    ty += 4
-    for line in wrap(story["body"], body_scale, inner):
-        draw_text(cv, x + pad, ty, line, body_scale, INK)
-        ty += 7 * body_scale + 4
+def draw_panel(x, y, w, h, accent, kicker, headline, body,
+               head_scale=4, body_scale=3, max_body_lines=5):
+    """One story card: white fill, ink border, accent top bar."""
+    rect(x, y, w, h, CARD)
+    border(x, y, w, h, INK, 2)
+    rect(x + 2, y + 2, w - 4, 6, accent)
+    ix = x + 18
+    iw = w - 36
+    # kicker (scale 2)
+    if text_width(kicker, 2) > iw:
+        raise ValueError("kicker too wide: %r" % kicker)
+    draw_text(ix, y + 16, kicker, 2, accent)
+    # headline (wrapped, scale head_scale)
+    head_chars = iw // (6 * head_scale)
+    head_lines = wrap(headline, head_chars)
+    for i, line in enumerate(head_lines):
+        if text_width(line, head_scale) > iw:
+            raise ValueError("headline line too wide: %r" % line)
+        draw_text(ix, y + 42 + i * (7 * head_scale + 4), line,
+                  head_scale, INK)
+    # body (wrapped, scale body_scale)
+    body_chars = iw // (6 * body_scale)
+    body_lines = wrap(body, body_chars)
+    if len(body_lines) > max_body_lines:
+        raise ValueError("body overflows: %d lines: %r"
+                         % (len(body_lines), body))
+    by = y + 42 + len(head_lines) * (7 * head_scale + 4) + 10
+    for i, line in enumerate(body_lines):
+        draw_text(ix, by + i * (7 * body_scale + 5), line,
+                  body_scale, BODY)
+    print("panel %-28r head=%d body=%d"
+          % (kicker, len(head_lines), len(body_lines)))
 
 
-def draw_masthead(cv):
-    cv.fill(24, 24, 976, 96, NAVY)
-    draw_text(cv, 512, 44, "WORLD NEWS", 10, WHITE, align="center")
-    cv.fill(24, 128, 976, 58, RED)
-    draw_text(cv, 512, 143, "MONDAY, 23 NOVEMBER 2026", 5, WHITE,
-              align="center")
+def draw_page():
+    # Masthead
+    rect(MARGIN, 24, CONTENT_W, 84, NAVY)
+    draw_centered(24 + 10, "WORLD NEWS", 9, (255, 255, 255))
+    # Date ribbon
+    rect(MARGIN, 116, CONTENT_W, 56, RED)
+    draw_centered(116 + 14, "MONDAY, 23 NOVEMBER 2026", 4,
+                  (255, 255, 255))
+
+    # Hero: Dymer toll rises to 11 (Monday update of round-1 story 3)
+    hx, hy, hw, hh = MARGIN, 182, CONTENT_W, 252
+    rect(hx, hy, hw, hh, CARD)
+    border(hx, hy, hw, hh, INK, 2)
+    rect(hx + 2, hy + 2, hw - 4, 6, RED)
+    hero_kicker = "UKRAINE - DYMER, NEAR KYIV - MONDAY TOLL RISES"
+    hero_head = "DYMER TOLL RISES TO 11"
+    hero_body = ("RESCUERS PULL AN 11TH BODY FROM THE DYMER FLATS MONDAY. "
+                 "A 7-YEAR-OLD BOY IS PULLED OUT ALIVE. KYIV REGION "
+                 "MOURNS AS THE WEEKEND TOLL HITS 15.")
+    if text_width(hero_kicker, 2) > hw - 40:
+        raise ValueError("hero kicker too wide")
+    draw_text(hx + 20, hy + 16, hero_kicker, 2, RED)
+    if text_width(hero_head, 7) > hw - 40:
+        raise ValueError("hero headline too wide")
+    draw_text(hx + 20, hy + 42, hero_head, 7, INK)
+    hero_lines = wrap(hero_body, (hw - 40) // (6 * 4))
+    if len(hero_lines) > 4:
+        raise ValueError("hero body overflows: %d lines" % len(hero_lines))
+    for i, line in enumerate(hero_lines):
+        draw_text(hx + 20, hy + 105 + i * 34, line, 4, BODY)
+    print("hero head=1 body=%d" % len(hero_lines))
+
+    # Grid 2x2
+    gw = (CONTENT_W - 12) // 2  # 482
+    panels = [
+        (MARGIN, 446, BLUE,
+         "UKRAINE - BENGHAZI, LIBYA - MONDAY",
+         "UKRAINE SINKS RUSSIAN WARSHIP OFF LIBYA",
+         "ZELENSKYY SAYS 7 SEA DRONES SANK THE CORVETTE MERKURY "
+         "SUNDAY. ANGARA ALSO HIT."),
+        (MARGIN + gw + 12, 446, STEEL,
+         "USA - WASHINGTON - SUNDAY",
+         "DEMOCRATS WIN 258 HOUSE SEATS",
+         "BIGGEST US HOUSE MAJORITY SINCE 1992. A NORTH CAROLINA "
+         "RECOUNT WIN SEALS A 44-SEAT SWEEP."),
+        (MARGIN, 710, GREEN,
+         "CLIMATE - AFTER COP31 - MONDAY",
+         "COP31 FALLOUT: BLAME BEGINS",
+         "AUSTRALIA'S OPPOSITION WANTS THE MINISTER OUT. PACIFIC "
+         "ISLANDS SAY 'LET DOWN'. NEXT: ADDIS ABABA 2027."),
+        (MARGIN + gw + 12, 710, PURPLE,
+         "SUDAN - KHARTOUM - SUNDAY",
+         "DRONES HIT KHARTOUM",
+         "SUNDAY STRIKES KILL CHILDREN AND WOUND 3 UN STAFF. UN AND "
+         "US CONDEMN MONDAY. SUDAN ALLEGES AN ETHIOPIAN LAUNCH."),
+    ]
+    for (px, py, accent, kicker, headline, body) in panels:
+        draw_panel(px, py, gw, 252, accent, kicker, headline, body)
+
+    # Footer
+    draw_centered(978,
+                  "FIVE STORIES FROM AROUND THE WORLD - "
+                  "SOURCES: REUTERS, AP, UN NEWS",
+                  2, MUTED)
 
 
-def draw_footer(cv):
-    draw_text(cv, 512, 1002,
-              "FIVE STORIES FROM AROUND THE WORLD - SOURCES: UN NEWS, REUTERS, AP",
-              2, GREY, align="center")
-
-
-# ---------------------------------------------------------------------------
-# Layout A — newspaper: hero full width, then a 2x2 grid
-# ---------------------------------------------------------------------------
-def layout_a(cv):
-    draw_masthead(cv)
-    # hero
-    hx, hy, hw, hh = 24, 194, 976, 288
-    cv.fill(hx, hy, hw, hh, WHITE)
-    cv.fill(hx, hy, hw, 10, GREEN)
-    cv.fill(hx, hy, hw, 2, INK)
-    cv.fill(hx, hy + hh - 2, hw, 2, INK)
-    cv.fill(hx, hy, 2, hh, INK)
-    cv.fill(hx + hw - 2, hy, 2, hh, INK)
-    draw_text(cv, hx + 24, hy + 28, HERO["kicker"], 3, GREEN)
-    ty = hy + 28 + 21 + 14
-    for line in HERO["headline"]:
-        draw_text(cv, hx + 24, ty, line, 7, INK)
-        ty += 7 * 7 + 8
-    ty += 6
-    for line in wrap(HERO["body"], 3, hw - 48):
-        draw_text(cv, hx + 24, ty, line, 3, INK)
-        ty += 7 * 3 + 5
-    # 2x2 grid
-    gx, gy = 24, 496
-    pw, ph = 480, 240
-    gap = 16
-    for i, story in enumerate(STORIES):
-        px = gx + (i % 2) * (pw + gap)
-        py = gy + (i // 2) * (ph + gap)
-        draw_panel(cv, px, py, pw, ph, story)
-    draw_footer(cv)
-
-
-# ---------------------------------------------------------------------------
-# Layout B — poster: tall hero left, stacked panels right, bottom row
-# ---------------------------------------------------------------------------
-def layout_b(cv):
-    draw_masthead(cv)
-    # tall hero on the left
-    hx, hy, hw, hh = 24, 194, 592, 506
-    cv.fill(hx, hy, hw, hh, WHITE)
-    cv.fill(hx, hy, hw, 10, GREEN)
-    cv.fill(hx, hy, hw, 2, INK)
-    cv.fill(hx, hy + hh - 2, hw, 2, INK)
-    cv.fill(hx, hy, 2, hh, INK)
-    cv.fill(hx + hw - 2, hy, 2, hh, INK)
-    draw_text(cv, hx + 24, hy + 28, HERO["kicker_short"], 3, GREEN)
-    ty = hy + 28 + 21 + 16
-    for line in ["COP31", "COLLAPSES:", "NO DEAL"]:
-        draw_text(cv, hx + 24, ty, line, 8, INK)
-        ty += 7 * 8 + 8
-    ty += 8
-    for line in wrap(HERO["body"], 3, 380):
-        draw_text(cv, hx + 24, ty, line, 3, INK)
-        ty += 7 * 3 + 5
-    draw_icon(cv, "globe", hx + hw - 150, hy + hh - 150, 120, GREEN)
-    # right column: two stacked panels (narrow kickers and headlines,
-    # smaller body text so the copy fits the narrow column)
-    rx, rw = 632, 368
-    rh = 245
-    for i in (0, 1):
-        story = dict(STORIES[i])
-        story["kicker"] = story["kicker_short"]
-        story["headline"] = story["headline_narrow"]
-        draw_panel(cv, rx, 194 + i * (rh + 16), rw, rh, story,
-                   head_scale=3, body_scale=2)
-    # bottom row: two panels
-    bx, by, bw, bh = 24, 716, 480, 260
-    for i in (2, 3):
-        draw_panel(cv, bx + (i - 2) * (bw + 16), by, bw, bh, STORIES[i],
-                   head_scale=4, body_scale=3)
-    draw_footer(cv)
-
-
-# ---------------------------------------------------------------------------
-# Pure-Python PNG encoder (zlib from the stdlib)
-# ---------------------------------------------------------------------------
-def png_bytes(cv):
+# ---------------------------------------------------------------- png
+def png_bytes():
     raw = bytearray()
-    for yy in range(cv.h):
-        raw.append(0)
-        raw.extend(cv.px[yy * cv.w * 3:(yy + 1) * cv.w * 3])
+    for y in range(H):
+        raw.append(0)  # filter: none
+        raw += canvas[y * W * 3:(y + 1) * W * 3]
     comp = zlib.compress(bytes(raw), 9)
 
     def chunk(tag, data):
-        out = struct.pack(">I", len(data)) + tag + data
-        return out + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        return (struct.pack(">I", len(data)) + tag + data +
+                struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
 
-    ihdr = struct.pack(">IIBBBBB", cv.w, cv.h, 8, 2, 0, 0, 0)
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-            + chunk(b"IDAT", comp) + chunk(b"IEND", b""))
+    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) +
+            chunk(b"IDAT", comp) + chunk(b"IEND", b""))
 
 
 def main():
-    layout = os.environ.get("LAYOUT", "a")
-    out_path = os.environ.get("OUTPUT_PATH", "/output/entry.png")
-    cv = Canvas(W, H, PAPER)
-    if layout == "b":
-        layout_b(cv)
-    else:
-        layout_a(cv)
-    data = png_bytes(cv)
-    out_dir = os.path.dirname(out_path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    with open(out_path, "wb") as fh:
-        fh.write(data)
-    print("wrote %s (%d bytes, %dx%d) sha256=%s"
-          % (out_path, len(data), W, H,
-             __import__("hashlib").sha256(data).hexdigest()))
+    draw_page()
+    data = png_bytes()
+    if len(data) > 1048576:
+        raise SystemExit("entry.png over 1 MiB: %d bytes" % len(data))
+    path = sys.argv[1] if len(sys.argv) > 1 else "/output/entry.png"
+    try:
+        with open(path, "wb") as f:
+            f.write(data)
+    except OSError:
+        path = "entry.png"
+        with open(path, "wb") as f:
+            f.write(data)
+    print("wrote %s %d bytes sha256=%s"
+          % (path, len(data), hashlib.sha256(data).hexdigest()))
 
 
 if __name__ == "__main__":
