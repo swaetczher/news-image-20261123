@@ -1,16 +1,19 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""news-image 20261123 round 3: one 1024x1024 PNG summing up Tuesday 24 Nov 2026.
+#!/usr/bin/env python3
+"""news-image 20261123 -- ronde 4 (FINAL).
 
-Stdlib only (hashlib, struct, sys, zlib). No network, no file reads, no
-environment access, no eval/dynamic import/shell: the program only runs its
-own code and writes one PNG file. Deterministic by construction: fixed
-zlib level, no timestamps in the PNG.
+Satu gambar koran 1024x1024, stdlib-only, deterministik.
+Resep: monocle-magazine (kertas krem, tinta, satu aksen merah editorial,
+hairline, hierarki 3-deck kicker -> headline -> dek, radius 0).
+Komposisi Mode C: editorial-cover (masthead + hero) + banner-grid-2x2.
+Skema: TEMPLATE dict + DATA dict, anchor-based + relative positioning.
 
-Usage: python3 main.py [output_path] [variant]
-  output_path defaults to /output/entry.png (kit convention)
-  variant "A" (default): newspaper, hero + 2x2 grid, hero stock chart
-  variant "B": newspaper, hero + 4 horizontal strips
+Pakai: python3 main.py [A|B|C] [output.png]
+  varian A = classic (default), B = bold hero, C = airy.
+  Tanpa argumen: varian A ke ./entry.png
+Hanya import stdlib: hashlib, struct, sys, zlib. Tanpa network, tanpa
+font/aset eksternal, tanpa angka acak, tanpa stempel waktu -> sha256
+identik di setiap run.
 """
 
 import hashlib
@@ -21,356 +24,419 @@ import zlib
 W = 1024
 H = 1024
 
-NAVY = (15, 42, 74)
-RED = (178, 34, 34)
-DARK = (28, 28, 28)
-GRAY = (96, 96, 96)
-GREEN = (30, 122, 52)
-LIGHT = (238, 238, 238)
-BORDER = (198, 198, 198)
-WHITE = (255, 255, 255)
-ORANGE = (198, 82, 28)
-PURPLE = (92, 62, 140)
-DARKRED = (140, 30, 30)
+# --- Design Decisions (monocle-magazine, dideklarasi sebelum kode) ---
+# Palet (4 warna saja, sesuai resep; olive resep TIDAK dipakai):
+PAPER = (0xF2, 0xEF, 0xE7)     # kertas krem #F2EFE7
+INK = (0x1A, 0x1A, 0x1A)       # tinta #1A1A1A
+ACCENT = (0xC7, 0x32, 0x2E)    # merah editorial #C7322E (tunggal)
+HAIRLINE = (0xC8, 0xC2, 0xB0)  # hairline #C8C2B0
+# Tipografi (font bitmap 5x7, 1 keluarga): masthead 6x, hero headline 5x,
+# grid headline 3x, body 2x, kicker 2x, footer 1x.
+# Rasio hero headline / body = 5/2 = 2,5x (batas resep). Radius 0.
+# Spacing: unit dasar 8 px; margin 32; gutter grid 24 (A) / 16 (B) / 32 (C).
 
-# 5x7 bitmap font. Each glyph is 7 rows of 5 cells ('#' = ink).
+MX = 32            # margin kiri/kanan
+CW = W - 2 * MX    # lebar konten = 960
+
+# --- Font bitmap 5x7 (ditulis dari nol; '#' = piksel tinta) ---
+# Tiap glyph: 7 baris x 5 kolom. Hanya huruf besar + angka + tanda baca
+# yang dipakai DATA; teks kecil otomatis diubah ke huruf besar.
 FONT = {
-    'A': ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
-    'B': ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
-    'C': ("01111", "10000", "10000", "10000", "10000", "10000", "01111"),
-    'D': ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
-    'E': ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
-    'F': ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
-    'G': ("01111", "10000", "10000", "10111", "10001", "10001", "01110"),
-    'H': ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
-    'I': ("11111", "00100", "00100", "00100", "00100", "00100", "11111"),
-    'J': ("00111", "00010", "00010", "00010", "00010", "10010", "01100"),
-    'K': ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
-    'L': ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
-    'M': ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
-    'N': ("10001", "11001", "11001", "10101", "10011", "10011", "10001"),
-    'O': ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
-    'P': ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
-    'Q': ("01110", "10001", "10001", "10001", "10101", "10010", "01101"),
-    'R': ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
-    'S': ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
-    'T': ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
-    'U': ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
-    'V': ("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
-    'W': ("10001", "10001", "10001", "10101", "10101", "11011", "10001"),
-    'X': ("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
-    'Y': ("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
-    'Z': ("11111", "00001", "00010", "00100", "01000", "10000", "11111"),
-    '0': ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
-    '1': ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
-    '2': ("01110", "10001", "00001", "00010", "00100", "01000", "11111"),
-    '3': ("11110", "00001", "00001", "01110", "00001", "00001", "11110"),
-    '4': ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
-    '5': ("11111", "10000", "11110", "00001", "00001", "10001", "01110"),
-    '6': ("01110", "10000", "10000", "11110", "10001", "10001", "01110"),
-    '7': ("11111", "00001", "00010", "00010", "00100", "00100", "00100"),
-    '8': ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
-    '9': ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
-    ' ': ("00000", "00000", "00000", "00000", "00000", "00000", "00000"),
-    '.': ("00000", "00000", "00000", "00000", "00000", "01100", "01100"),
-    ',': ("00000", "00000", "00000", "00000", "01100", "01100", "01000"),
-    "'": ("00100", "00100", "01000", "00000", "00000", "00000", "00000"),
-    '"': ("01010", "01010", "00000", "00000", "00000", "00000", "00000"),
-    ':': ("00000", "01100", "01100", "00000", "01100", "01100", "00000"),
-    ';': ("00000", "01100", "01100", "00000", "01100", "01100", "01000"),
-    '!': ("00100", "00100", "00100", "00100", "00100", "00000", "00100"),
-    '?': ("01110", "10001", "00001", "00010", "00100", "00000", "00100"),
-    '-': ("00000", "00000", "00000", "11111", "00000", "00000", "00000"),
-    '(': ("00010", "00100", "01000", "01000", "01000", "00100", "00010"),
-    ')': ("01000", "00100", "00010", "00010", "00010", "00100", "01000"),
-    '/': ("00001", "00001", "00010", "00100", "01000", "10000", "10000"),
-    '%': ("10001", "10010", "00010", "00100", "01000", "01001", "10001"),
-    '+': ("00000", "00100", "00100", "11111", "00100", "00100", "00000"),
-    '$': ("00100", "01111", "10100", "01110", "00101", "11110", "00100"),
-    '&': ("01100", "10010", "10010", "01000", "10101", "10010", "01101"),
-    '=': ("00000", "00000", "11111", "00000", "11111", "00000", "00000"),
-    '_': ("00000", "00000", "00000", "00000", "00000", "00000", "11111"),
-    '*': ("00000", "01010", "00100", "11111", "00100", "01010", "00000"),
+    "A": (".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
+    "B": ("####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."),
+    "C": (".####", "#....", "#....", "#....", "#....", "#....", ".####"),
+    "D": ("####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."),
+    "E": ("#####", "#....", "#....", "####.", "#....", "#....", "#####"),
+    "F": ("#####", "#....", "#....", "####.", "#....", "#....", "#...."),
+    "G": (".####", "#....", "#....", "#.###", "#...#", "#...#", ".###."),
+    "H": ("#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
+    "I": ("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"),
+    "J": ("..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."),
+    "K": ("#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"),
+    "L": ("#....", "#....", "#....", "#....", "#....", "#....", "#####"),
+    "M": ("#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"),
+    "N": ("#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"),
+    "O": (".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
+    "P": ("####.", "#...#", "#...#", "####.", "#....", "#....", "#...."),
+    "Q": (".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"),
+    "R": ("####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"),
+    "S": (".####", "#....", "#....", ".###.", "....#", "....#", "####."),
+    "T": ("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."),
+    "U": ("#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
+    "V": ("#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."),
+    "W": ("#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"),
+    "X": ("#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"),
+    "Y": ("#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."),
+    "Z": ("#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"),
+    "0": (".###.", "#..##", "#.#.#", "##..#", "#...#", "#...#", ".###."),
+    "1": ("..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."),
+    "2": (".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"),
+    "3": ("####.", "....#", "....#", ".###.", "....#", "....#", "####."),
+    "4": ("...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."),
+    "5": ("#####", "#....", "####.", "....#", "....#", "#...#", ".###."),
+    "6": (".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."),
+    "7": ("#####", "....#", "...#.", "..#..", "..#..", "..#..", "..#.."),
+    "8": (".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."),
+    "9": (".###.", "#...#", "#...#", ".####", "....#", "....#", ".###."),
+    " ": (".....", ".....", ".....", ".....", ".....", ".....", "....."),
+    ".": (".....", ".....", ".....", ".....", ".....", ".##..", ".##.."),
+    ",": (".....", ".....", ".....", ".....", ".##..", ".##..", ".#..."),
+    ":": (".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."),
+    ";": (".....", ".##..", ".##..", ".....", ".##..", ".##..", ".#..."),
+    "!": ("..#..", "..#..", "..#..", "..#..", "..#..", ".....", "..#.."),
+    "?": (".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."),
+    "'": ("..#..", "..#..", ".#...", ".....", ".....", ".....", "....."),
+    '"': (".#.#.", ".#.#.", ".....", ".....", ".....", ".....", "....."),
+    "-": (".....", ".....", ".....", ".###.", ".....", ".....", "....."),
+    "(": ("...##", "..#..", ".#...", ".#...", ".#...", "..#..", "...##"),
+    ")": ("##...", "..#..", "...#.", "...#.", "...#.", "..#..", "##..."),
+    "/": ("....#", "....#", "...#.", "..#..", ".#...", "#....", "#...."),
+    "%": ("##..#", "##.#.", "...#.", "..#..", ".#...", "#.##.", "#..##"),
+    "&": (".###.", "#...#", "#.#..", ".#...", "#.#.#", "#..#.", ".##.#"),
+    "+": (".....", "..#..", "..#..", "#####", "..#..", "..#..", "....."),
+    "=": (".....", ".....", "#####", ".....", "#####", ".....", "....."),
+    "*": (".....", ".#.#.", "..#..", "#####", "..#..", ".#.#.", "....."),
+    "#": (".#.#.", ".#.#.", "#####", ".#.#.", "#####", ".#.#.", ".#.#."),
+    "$": ("..#..", ".####", "#.#..", ".###.", "..#.#", "####.", "..#.."),
+    "@": (".###.", "#...#", "#.###", "#.#.#", "#.#..", "#....", ".###."),
+    "_": (".....", ".....", ".....", ".....", ".....", ".....", "#####"),
+    "<": ("...#.", "..#..", ".#...", "#....", ".#...", "..#..", "...#."),
+    ">": (".#...", "..#..", "...#.", "....#", "...#.", "..#..", ".#..."),
+    "|": ("..#..", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."),
 }
 
-
-def glyph(ch):
-    return FONT.get(ch, FONT[' '])
-
-
-def char_w(scale):
-    return 6 * scale
+for _g in FONT.values():
+    assert len(_g) == 7 and all(len(_r) == 5 for _r in _g)
 
 
 def text_w(text, scale):
-    return len(text) * char_w(scale) - scale
+    """Lebar piksel teks pada skala tertentu (1 kolom spasi antar huruf)."""
+    return len(text) * 6 * scale - scale
 
 
 def wrap(text, max_chars):
-    """Greedy word wrap. Returns list of lines, each <= max_chars."""
-    words = text.split(' ')
+    """Bungkus kata per kata; satu kata yang lebih panjang dari batas = error."""
+    words = text.split(" ")
     lines = []
-    cur = ''
+    cur = ""
     for word in words:
-        trial = word if not cur else cur + ' ' + word
+        if len(word) > max_chars:
+            raise ValueError("kata terlalu panjang untuk lebar panel: " + word)
+        trial = word if not cur else cur + " " + word
         if len(trial) <= max_chars:
             cur = trial
         else:
-            if cur:
-                lines.append(cur)
+            lines.append(cur)
             cur = word
     if cur:
         lines.append(cur)
     return lines
 
 
+# --- Kanvas ---
 class Canvas:
-    def __init__(self, w, h, bg):
-        self.w = w
-        self.h = h
-        self.px = bytearray(bg * (w * h))
+    def __init__(self):
+        self.px = bytearray(PAPER * (W * H))
+
+    def _put(self, x, y, color):
+        if 0 <= x < W and 0 <= y < H:
+            i = (y * W + x) * 3
+            self.px[i] = color[0]
+            self.px[i + 1] = color[1]
+            self.px[i + 2] = color[2]
 
     def rect(self, x, y, w, h, color):
-        x0 = max(0, x)
-        y0 = max(0, y)
-        x1 = min(self.w, x + w)
-        y1 = min(self.h, y + h)
-        r, g, b = color
-        for yy in range(y0, y1):
-            base = (yy * self.w + x0) * 3
-            for xx in range(x0, x1):
-                i = base + (xx - x0) * 3
-                self.px[i] = r
-                self.px[i + 1] = g
-                self.px[i + 2] = b
+        for yy in range(y, y + h):
+            for xx in range(x, x + w):
+                self._put(xx, yy, color)
 
-    def text(self, s, x, y, scale, color):
+    def hline(self, x, y, w, color, thick=1):
+        self.rect(x, y, w, thick, color)
+
+    def vline(self, x, y, h, color, thick=1):
+        self.rect(x, y, thick, h, color)
+
+    def char(self, x, y, ch, scale, color):
+        glyph = FONT.get(ch)
+        if glyph is None:
+            raise ValueError("glyph tidak ada di font: " + repr(ch))
+        for r in range(7):
+            row = glyph[r]
+            for c in range(5):
+                if row[c] == "#":
+                    self.rect(x + c * scale, y + r * scale, scale, scale, color)
+
+    def text(self, x, y, s, scale, color):
         s = s.upper()
+        if x < 0 or y < 0 or y + 7 * scale > H:
+            raise ValueError("teks keluar kanvas: " + s[:20])
         cx = x
         for ch in s:
-            rows = glyph(ch)
-            for ry in range(7):
-                row = rows[ry]
-                for rx in range(5):
-                    if row[rx] == '1':
-                        self.rect(cx + rx * scale, y + ry * scale,
-                                  scale, scale, color)
-            cx += char_w(scale)
+            self.char(cx, y, ch, scale, color)
+            cx += 6 * scale
+        if cx - scale > W:
+            raise ValueError("teks keluar kanvas: " + s[:20])
+        return cx
 
-    def text_centered(self, s, cx, y, scale, color):
-        self.text(s, cx - text_w(s, scale) // 2, y, scale, color)
+    def text_center(self, x0, width, y, s, scale, color):
+        wpx = text_w(s.upper(), scale)
+        return self.text(x0 + (width - wpx) // 2, y, s, scale, color)
 
 
-def png_bytes(canvas):
-    raw = bytearray()
-    stride = canvas.w * 3
-    for y in range(canvas.h):
-        raw.append(0)
-        raw += canvas.px[y * stride:(y + 1) * stride]
-    comp = zlib.compress(bytes(raw), 9)
+# --- Relative positioning (snapping ala Canva) ---
+def below(y_bottom, gap):
+    return y_bottom + gap
 
-    def chunk(tag, data):
-        out = struct.pack('>I', len(data)) + tag + data
-        out += struct.pack('>I', zlib.crc32(tag + data) & 0xFFFFFFFF)
-        return out
 
-    ihdr = struct.pack('>IIBBBBB', canvas.w, canvas.h, 8, 2, 0, 0, 0)
-    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr)
-            + chunk(b'IDAT', comp) + chunk(b'IEND', b''))
+def right_of(x_right, gap):
+    return x_right + gap
 
-# ---- Content: Tuesday 24 November 2026 (all anchored Monday 23 Nov) ----
-DATE_LINE = "TUESDAY, 24 NOVEMBER 2026"
-FOOTER = "FIVE STORIES FROM AROUND THE WORLD - SOURCES: REUTERS, AP, CNN"
 
-HERO = {
-    "kicker": "BUSINESS - NVIDIA - MONDAY",
-    "head": "HUANG IS BACK",
-    "body": ("NVIDIA REINSTATES JENSEN HUANG AS CEO MONDAY AFTER TRUMP "
-             "INTERVENES. SHARES SURGE 33%, NASDAQ JUMPS 6%."),
+def center_in(x0, width, text, scale):
+    return x0 + (width - text_w(text.upper(), scale)) // 2
+
+
+# --- Skema template poster-generator-layout (satu sumber kebenaran) ---
+# TEMPLATE: settings + anchors + layers (background -> content -> foreground)
+# + grup headers / hero / grid / footer. DATA: isi edisi.
+TEMPLATE = {
+    "schema": "1.0",
+    "settings": {"width": 1024, "height": 1024, "background_color": "#F2EFE7"},
+    "anchors": {
+        "masthead_bottom": {"x": 0, "y": 66},
+        "hero_top": {"x": 32, "y": 136},
+        "grid_top": {"x": 32, "y": 336},
+        "footer_top": {"x": 32, "y": 962},
+    },
+    "layers": ["background", "content", "foreground"],
+    "groups": ["headers", "hero", "grid", "footer"],
 }
 
-# Grid panels (variant A): kicker 1 line, head <= 3 lines @ scale 4,
-# body <= 5 lines @ scale 3 (24 chars/line).
-PANELS = [
-    {
-        "kicker": "INDONESIA - BANTEN",
-        "head": "24 DEAD IN INDONESIA FACTORY FIRE",
-        "body": ("SATURDAY BLAZE AT CIKANDE CANDY PLANT CONFIRMED MONDAY. "
-                 "ABOUT 30 STILL MISSING. RESCUERS SEARCH RUINS."),
-        "accent": ORANGE,
-    },
-    {
-        "kicker": "SPACE - WESTERN INTELLIGENCE",
-        "head": "NUCLEAR SATELLITE ALARM",
-        "body": ("WESTERN INTEL SAYS RUSSIA COULD LAUNCH NUCLEAR-ARMED "
-                 "'SPUTNIK-S' WITHIN WEEKS. NATO VOWS SPACE IS COVERED."),
-        "accent": PURPLE,
-    },
-    {
-        "kicker": "RUSSIA - KREMLIN",
-        "head": "KREMLIN VOWS 'PAINFUL CONSEQUENCES'",
-        "body": ("MOSCOW THREATENS KYIV MONDAY AFTER UKRAINE SAYS IT SANK "
-                 "THE CORVETTE MERKURY OFF LIBYA. ROSTOV REFINERY HALTS."),
-        "accent": DARKRED,
-    },
-    {
-        "kicker": "USA - APPEALS COURT",
-        "head": "COURT OPENS PATH TO ERASE TRUMP CONVICTION",
-        "body": ("APPEALS PANEL REVIVES BID TO MOVE HUSH-MONEY CASE TO "
-                 "FEDERAL COURT MONDAY. IMMUNITY FIGHT NEXT."),
-        "accent": NAVY,
-    },
-]
+# DATA edisi (5 berita riset-4 + tanggal). Label klaim WAJIB:
+# 1 "under investigation" | 2 "coalition says" | 3 "around 175" +
+# "left Dakar about two weeks ago" | 5 "states allege" + "filed Monday".
+DATA = {
+    "masthead_text": "THE WORLD IN ONE DAY",
+    "dateline": "WEDNESDAY, 25 NOVEMBER 2026",
+    "dateline_right": "FIVE STORIES - ONE PAGE",
+    "hero_kicker": "01 - CHINA - ANNOUNCED TUESDAY",
+    "hero_title": "CHINA PROBES POLITBURO MEMBER",
+    "hero_dek": (
+        "Shanghai party chief Chen Jining under investigation for suspected "
+        "severe violations of discipline and laws. The fourth Politburo "
+        "member probed since 2025."
+    ),
+    "hero_fact": "AGE 62 - SHANGHAI PARTY CHIEF - FOURTH SINCE 2025",
+    "stories": [
+        {
+            "num": "02",
+            "kicker": "SAUDI ARABIA - COALITION SAYS",
+            "title": "RIYADH TOWER TARGETED",
+            "body": (
+                "Coalition calls it a terrorist attack on Tuesday. Houthis "
+                "struck the PIF tower and an Aramco building this month. "
+                "No tower name, culprit or toll was given."
+            ),
+            "fact": "8 NOV - ARAMCO BUILDING HIT",
+        },
+        {
+            "num": "03",
+            "kicker": "SENEGAL - AROUND 175 MISSING",
+            "title": "MIGRANT BOAT LOST OFF SENEGAL",
+            "body": (
+                "Europe-bound boat left Dakar about two weeks ago. Contact "
+                "lost with around 175 people aboard. Senegal's navy rescued "
+                "974 migrants on Monday."
+            ),
+            "fact": "5,200 RESCUED SINCE EARLY NOVEMBER",
+        },
+        {
+            "num": "04",
+            "kicker": "IRAQ - AFTER SMUGGLING PROBE",
+            "title": "BAGHDAD SEIZES KURDISH CROSSINGS",
+            "body": (
+                "PM orders a federal takeover of border crossings and "
+                "oilfields in four provinces on Tuesday. Oil funds over 90 "
+                "percent of state revenue."
+            ),
+            "fact": "120,000 BARRELS A DAY",
+        },
+        {
+            "num": "05",
+            "kicker": "UNITED STATES - STATES ALLEGE",
+            "title": "TWO STATES SUE SPACEX OVER GROK",
+            "body": (
+                "Virginia and Oregon filed suit Monday alleging the chatbot "
+                "made sexual images, including child abuse material. The "
+                "states seek damages and a court order."
+            ),
+            "fact": "2,500 DOLLARS PER WILFUL VIOLATION",
+        },
+    ],
+    "footer_left": "SOURCES: REUTERS AND AP - CLAIMS LABELLED AS REPORTED",
+    "footer_right": "PAGE 1 - 25 NOVEMBER 2026",
+}
 
-# Strip headlines (variant B): head <= 2 lines @ scale 4 in 480 px.
-STRIP_HEADS = [
-    "24 DEAD IN INDONESIA FACTORY FIRE",
-    "NUCLEAR SATELLITE ALARM",
-    "KREMLIN VOWS 'PAINFUL CONSEQUENCES'",
-    "COURT OPENS PATH TO ERASE CONVICTION",
-]
-
-
-# Strip bodies (variant B): <= 5 lines @ scale 3 in 412 px (22 chars/line).
-STRIP_BODIES = [
-    "SATURDAY BLAZE IN CIKANDE CONFIRMED MONDAY. ABOUT 30 STILL MISSING.",
-    "WESTERN INTEL: RUSSIA COULD LAUNCH 'SPUTNIK-S' WITHIN WEEKS.",
-    "MOSCOW THREATENS KYIV AFTER MERKURY SINKING. REFINERY HALTS.",
-    "APPEALS PANEL REVIVES BID TO MOVE CASE TO FEDERAL COURT.",
-]
-
-
-def draw_masthead(cv):
-    cv.rect(24, 24, 976, 84, NAVY)
-    cv.text_centered("WORLD NEWS", 512, 40, 9, WHITE)
-    cv.rect(24, 112, 976, 42, RED)
-    cv.text_centered(DATE_LINE, 512, 121, 4, WHITE)
-
-
-def draw_hero(cv, x, y, w, h, chart=True):
-    cv.rect(x, y, w, h, WHITE)
-    cv.rect(x, y, w, 3, NAVY)
-    cv.rect(x, y + h - 3, w, 3, NAVY)
-    cv.rect(x, y, 3, h, NAVY)
-    cv.rect(x + w - 3, y, 3, h, NAVY)
-    tx = x + 24
-    cv.text(HERO["kicker"], tx, y + 16, 2, RED)
-    cv.text(HERO["head"], tx, y + 38, 7, NAVY)
-    body_w = (w - 48 - 300) if chart else (w - 48)
-    max_chars = body_w // char_w(4)
-    lines = wrap(HERO["body"], max_chars)
-    assert len(lines) <= 5, "hero body overflow: %r" % (lines,)
-    yy = y + 104
-    for line in lines:
-        assert text_w(line, 4) <= body_w, "hero line too wide: %r" % line
-        cv.text(line, tx, yy, 4, DARK)
-        yy += 28
-    if chart:
-        # Rising-bars chart: Nvidia shares +33%.
-        cx0 = x + w - 292
-        base = y + h - 52
-        cv.text("+33%", cx0 + 8, y + 96, 5, GREEN)
-        cv.text("SHARES", cx0 + 8, y + 136, 2, GRAY)
-        heights = [36, 62, 88, 116, 148]
-        bx = cx0
-        for i, hh in enumerate(heights):
-            col = NAVY if i == 4 else GREEN
-            cv.rect(bx, base - hh, 44, hh, col)
-            bx += 54
-        cv.rect(cx0, base, 264, 3, DARK)
-        cv.text("NASDAQ +6%", cx0 + 8, base + 12, 2, GRAY)
+# Varian dari template + resep yang SAMA (beda hierarki/spacing saja).
+PARAMS = {
+    # A classic: masthead 6x, hero headline 5x satu baris, grid headline 3x.
+    "A": {"masthead": 6, "hero_head": 5, "grid_head": 3, "gutter": 24,
+          "hero_gap": 14, "grid_gap": 24},
+    # B bold hero: masthead 5x, hero headline 6x dua baris, grid headline 2x.
+    "B": {"masthead": 5, "hero_head": 6, "grid_head": 2, "gutter": 16,
+          "hero_gap": 12, "grid_gap": 16},
+    # C airy: masthead 6x, hero headline 5x, grid headline 3x, gutter lega.
+    "C": {"masthead": 6, "hero_head": 5, "grid_head": 3, "gutter": 32,
+          "hero_gap": 18, "grid_gap": 32},
+}
 
 
-def draw_panel(cv, p, x, y, w, h):
-    cv.rect(x, y, w, h, WHITE)
-    cv.rect(x, y, w, 8, p["accent"])
-    cv.rect(x, y, w, 2, BORDER)
-    cv.rect(x, y + h - 2, w, 2, BORDER)
-    cv.rect(x, y, 2, h, BORDER)
-    cv.rect(x + w - 2, y, 2, h, BORDER)
-    tx = x + 16
-    inner = w - 32
-    cv.text(p["kicker"], tx, y + 20, 2, RED)
-    head_lines = wrap(p["head"], inner // char_w(4))
-    assert len(head_lines) <= 3, "panel head overflow: %r" % (head_lines,)
-    yy = y + 44
-    for line in head_lines:
-        assert text_w(line, 4) <= inner, "panel head too wide: %r" % line
-        cv.text(line, tx, yy, 4, NAVY)
-        yy += 28
-    body_lines = wrap(p["body"], inner // char_w(3))
-    assert len(body_lines) <= 5, "panel body overflow: %r" % (body_lines,)
-    yy += 6
-    for line in body_lines:
-        assert text_w(line, 3) <= inner, "panel body too wide: %r" % line
-        cv.text(line, tx, yy, 3, DARK)
-        yy += 21
+def check_data():
+    """Semua variabel terisi + semua karakter ada di font (bukan string kosong)."""
+    for key, val in DATA.items():
+        if isinstance(val, str):
+            if not val.strip():
+                raise ValueError("variabel kosong: " + key)
+            for ch in val.upper():
+                if ch not in FONT:
+                    raise ValueError("karakter tak didukung: " + repr(ch))
+    for st in DATA["stories"]:
+        for key in ("num", "kicker", "title", "body", "fact"):
+            if not st[key].strip():
+                raise ValueError("variabel kosong: story " + key)
+            for ch in st[key].upper():
+                if ch not in FONT:
+                    raise ValueError("karakter tak didukung: " + repr(ch))
 
 
-def draw_strip(cv, p, head, body, x, y, w, h):
-    cv.rect(x, y, w, h, WHITE)
-    cv.rect(x, y, 8, h, p["accent"])
-    cv.rect(x, y, w, 2, BORDER)
-    cv.rect(x, y + h - 2, w, 2, BORDER)
-    cv.rect(x, y, 2, h, BORDER)
-    cv.rect(x + w - 2, y, 2, h, BORDER)
-    lx = x + 24
-    cv.text(p["kicker"], lx, y + 14, 2, RED)
-    head_lines = wrap(head, 520 // char_w(4))
-    assert len(head_lines) <= 2, "strip head overflow: %r" % (head_lines,)
-    yy = y + 36
-    for line in head_lines:
-        cv.text(line, lx, yy, 4, NAVY)
-        yy += 28
-    bx = x + 540
-    body_lines = wrap(body, (w - 564) // char_w(3))
-    assert len(body_lines) <= 5, "strip body overflow: %r" % (body_lines,)
-    yy = y + 16
-    for line in body_lines:
-        cv.text(line, bx, yy, 3, DARK)
-        yy += 21
+# --- Render (layer: background -> content -> foreground) ---
+def render(variant):
+    if variant not in PARAMS:
+        raise ValueError("varian tidak dikenal: " + variant + " (pilih A/B/C)")
+    p = PARAMS[variant]
+    check_data()
+    cv = Canvas()
+    anchors = {}
+
+    # ===== LAYER background =====
+    cv.rect(0, 0, W, H, PAPER)
+
+    # ===== LAYER content =====
+    # --- grup headers: masthead + dateline ---
+    y = 24
+    cv.text_center(MX, CW, y, DATA["masthead_text"], p["masthead"], INK)
+    anchors["masthead_bottom"] = y + 7 * p["masthead"]
+    y = below(anchors["masthead_bottom"], 12)
+    cv.hline(MX, y, CW, ACCENT, 3)
+    y = below(y + 3, 10)
+    cv.text(MX, y, DATA["dateline"], 2, INK)
+    rx = MX + CW - text_w(DATA["dateline_right"], 2)
+    cv.text(rx, y, DATA["dateline_right"], 2, ACCENT)
+    y = below(y + 14, 10)
+    cv.hline(MX, y, CW, HAIRLINE, 1)
+
+    # --- grup hero: kicker -> headline -> dek -> fact strip ---
+    y = below(y + 1, 16)
+    anchors["hero_top"] = y
+    cv.text(MX, y, DATA["hero_kicker"], 2, ACCENT)
+    y = below(y + 14, p["hero_gap"])
+    max_head = CW // (6 * p["hero_head"])
+    head_lines = wrap(DATA["hero_title"], max_head)
+    for ln in head_lines:
+        cv.text(MX, y, ln, p["hero_head"], INK)
+        y += 7 * p["hero_head"] + 6
+    y = below(y - 6, 14)
+    dek_lines = wrap(DATA["hero_dek"], CW // 12)
+    for ln in dek_lines:
+        cv.text(MX, y, ln, 2, INK)
+        y += 18
+    y = below(y, 12)
+    cv.hline(MX, y, CW, HAIRLINE, 1)
+    y = below(y + 1, 10)
+    cv.text(MX, y, DATA["hero_fact"], 2, INK)
+    y = below(y + 14, 10)
+    cv.hline(MX, y, CW, HAIRLINE, 1)
+    anchors["hero_bottom"] = y + 1
+
+    # --- grup grid: 2x2, hairline antar-kolom dan antar-baris ---
+    gutter = p["gutter"]
+    grid_top = below(anchors["hero_bottom"], p["grid_gap"])
+    anchors["grid_top"] = grid_top
+    footer_rule_y = 958
+    avail = footer_rule_y - grid_top - 8
+    row_h = (avail - gutter) // 2
+    panel_w = (CW - gutter) // 2
+    grid_bottom = grid_top + 2 * row_h + gutter
+    mid_x = MX + panel_w + gutter // 2
+    cv.vline(mid_x, grid_top, grid_bottom - grid_top, HAIRLINE, 1)
+    mid_y = grid_top + row_h + gutter // 2
+    cv.hline(MX, mid_y, CW, HAIRLINE, 1)
+
+    for idx, st in enumerate(DATA["stories"]):
+        col = idx % 2
+        row = idx // 2
+        px = MX + col * (panel_w + gutter)
+        py = grid_top + row * (row_h + gutter)
+        # kicker: nomor + topik, aksen merah tunggal
+        cv.text(px, py, st["num"] + " - " + st["kicker"], 2, ACCENT)
+        hy = below(py + 14, 10)
+        max_gh = panel_w // (6 * p["grid_head"])
+        gh_lines = wrap(st["title"], max_gh)
+        for ln in gh_lines:
+            cv.text(px, hy, ln, p["grid_head"], INK)
+            hy += 7 * p["grid_head"] + 4
+        by = below(hy - 4, 12)
+        body_lines = wrap(st["body"], panel_w // 12)
+        for ln in body_lines:
+            cv.text(px, by, ln, 2, INK)
+            by += 18
+        # fact strip di dasar panel (hairline + angka kunci)
+        fy = py + row_h - 34
+        cv.hline(px, fy, panel_w, HAIRLINE, 1)
+        cv.text(px, below(fy + 1, 8), st["fact"], 2, INK)
+
+    # ===== LAYER foreground =====
+    # --- grup footer ---
+    cv.hline(MX, footer_rule_y, CW, HAIRLINE, 1)
+    fy = below(footer_rule_y + 1, 12)
+    cv.text(MX, fy, DATA["footer_left"], 1, INK)
+    rx = MX + CW - text_w(DATA["footer_right"], 1)
+    cv.text(rx, fy, DATA["footer_right"], 1, INK)
+    anchors["footer_top"] = footer_rule_y
+    return cv, anchors
 
 
-def layout_a(cv):
-    draw_masthead(cv)
-    draw_hero(cv, 24, 162, 976, 286, chart=True)
-    # 2x2 grid: panels 488x244, gap 16.
-    xs = [24, 528]
-    ys = [460, 716]
-    for i, p in enumerate(PANELS):
-        draw_panel(cv, p, xs[i % 2], ys[i // 2], 488, 244)
-    cv.text_centered(FOOTER, 512, 976, 2, GRAY)
+# --- Encoder PNG pure-Python (deterministik: filter 0, level 9) ---
+def chunk(ctype, data):
+    out = struct.pack(">I", len(data)) + ctype + data
+    out += struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF)
+    return out
 
 
-def layout_b(cv):
-    draw_masthead(cv)
-    draw_hero(cv, 24, 162, 976, 286, chart=True)
-    # 4 horizontal strips, 976x118, gap 10.
-    y = 460
-    for i, p in enumerate(PANELS):
-        draw_strip(cv, p, STRIP_HEADS[i], STRIP_BODIES[i], 24, y, 976, 118)
-        y += 128
-    cv.text_centered(FOOTER, 512, 976, 2, GRAY)
+def encode_png(cv):
+    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
+    raw = bytearray()
+    for yy in range(H):
+        raw.append(0)
+        raw += cv.px[yy * W * 3:(yy + 1) * W * 3]
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", ihdr)
+    png += chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+    png += chunk(b"IEND", b"")
+    return png
 
 
 def main(argv):
-    out = argv[1] if len(argv) > 1 else "/output/entry.png"
-    variant = argv[2] if len(argv) > 2 else "A"
-    cv = Canvas(W, H, WHITE)
-    if variant == "B":
-        layout_b(cv)
-    else:
-        layout_a(cv)
-    data = png_bytes(cv)
-    try:
-        with open(out, "wb") as f:
-            f.write(data)
-    except OSError:
-        with open("entry.png", "wb") as f:
-            f.write(data)
-        out = "entry.png"
-    print("wrote %s variant=%s bytes=%d sha256=%s"
-          % (out, variant, len(data), hashlib.sha256(data).hexdigest()))
+    variant = argv[1] if len(argv) > 1 else "A"
+    out = argv[2] if len(argv) > 2 else "entry.png"
+    cv, anchors = render(variant)
+    data = encode_png(cv)
+    with open(out, "wb") as f:
+        f.write(data)
+    digest = hashlib.sha256(data).hexdigest()
+    print("varian=" + variant + " file=" + out + " byte=" + str(len(data)))
+    print("sha256=" + digest)
+    print("anchors=" + str(anchors))
     return 0
 
 
